@@ -1,15 +1,15 @@
 import functools
 import json
+import logging
 import os
 import sqlite3
 import sys
 from datetime import datetime, timedelta
-from pathlib import Path
 from fastmcp import FastMCP
 
 # Ensure parent directory is in python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-from backend.app.database import DB_PATH
+from backend.app.database import db_connection, get_db_connection
 
 # Initialize FastMCP Server matching hackathon specification
 mcp = FastMCP("stockroom-copilot")
@@ -20,33 +20,29 @@ MAX_ORDER_QTY = 1000
 
 # Helper for SQLite connections per request
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
+    return get_db_connection()
 
 # Automatic Logging Decorator
 def log_event(source, event_type, tool_name=None, sku=None, success=True, summary=None, details=None):
     try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute(
-            """INSERT INTO activity_log (source, event_type, tool_name, sku, success, summary, details)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                source,
-                event_type,
-                tool_name,
-                sku,
-                1 if success else 0,
-                summary or tool_name,
-                json.dumps(details) if details else None,
+        with db_connection() as conn:
+            conn.execute(
+                """INSERT INTO activity_log
+                   (source, event_type, tool_name, sku, success, summary, details, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                (
+                    source,
+                    event_type,
+                    tool_name,
+                    sku,
+                    1 if success else 0,
+                    summary or tool_name or event_type,
+                    json.dumps(details) if details else None,
+                ),
             )
-        )
-        conn.commit()
-        conn.close()
+            conn.commit()
     except Exception as e:
-        print(f"Logging error: {e}")
+        logging.getLogger(__name__).exception("Activity logging failed: %s", e)
 
 def logged(tool_name):
     def decorator(fn):
@@ -114,23 +110,26 @@ def check_inventory_levels(
     clause = ("WHERE " + " AND ".join(where)) if where else ""
 
     conn = get_db()
-    cursor = conn.cursor()
+    try:
+        total = conn.execute(
+            f"SELECT COUNT(*) AS n FROM v_inventory_status {clause}", params
+        ).fetchone()["n"]
 
-    total = cursor.execute(f"SELECT COUNT(*) AS n FROM v_inventory_status {clause}", params).fetchone()["n"]
+        sql_items = f"""
+            SELECT sku, name, category, supplier, lead_time_days, on_hand, reorder_point,
+                   ROUND(avg_daily_usage, 1) AS avg_daily_usage,
+                   CAST(days_of_cover AS REAL) AS days_of_cover, status
+            FROM v_inventory_status {clause}
+            ORDER BY days_of_cover ASC NULLS LAST LIMIT ?
+        """
+        rows = [dict(r) for r in conn.execute(sql_items, params + [limit]).fetchall()]
 
-    sql_items = f"""
-        SELECT sku, name, category, supplier, lead_time_days, on_hand, reorder_point,
-               ROUND(avg_daily_usage, 1) AS avg_daily_usage,
-               CAST(days_of_cover AS REAL) AS days_of_cover, status
-        FROM v_inventory_status {clause}
-        ORDER BY days_of_cover ASC NULLS LAST LIMIT ?
-    """
-    rows = [dict(r) for r in cursor.execute(sql_items, params + [limit]).fetchall()]
-
-    mix = cursor.execute("SELECT status, COUNT(*) AS n FROM v_inventory_status GROUP BY status").fetchall()
-    portfolio = {r["status"]: r["n"] for r in mix}
-
-    conn.close()
+        mix = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM v_inventory_status GROUP BY status"
+        ).fetchall()
+        portfolio = {r["status"]: r["n"] for r in mix}
+    finally:
+        conn.close()
 
     return {
         "ok": True,
@@ -180,14 +179,16 @@ def predict_stockout(
     """
 
     conn = get_db()
-    cursor = conn.cursor()
-
-    rows = [dict(r) for r in cursor.execute(sql, ["pending_review"] + params + [limit]).fetchall()]
-    at_risk = cursor.execute(
-        "SELECT COUNT(*) AS n FROM v_inventory_status WHERE days_of_cover < lead_time_days"
-    ).fetchone()["n"]
-
-    conn.close()
+    try:
+        rows = [
+            dict(r)
+            for r in conn.execute(sql, ["pending_review"] + params + [limit]).fetchall()
+        ]
+        at_risk = conn.execute(
+            "SELECT COUNT(*) AS n FROM v_inventory_status WHERE days_of_cover < lead_time_days"
+        ).fetchone()["n"]
+    finally:
+        conn.close()
 
     return {
         "ok": True,
@@ -208,67 +209,93 @@ def trigger_reorder(sku: str, quantity: int | None = None, reason: str | None = 
     reason = (reason or "")[:200] or None
 
     conn = get_db()
-    cursor = conn.cursor()
-
     try:
-        item = cursor.execute("SELECT * FROM v_inventory_status WHERE sku = ?", (sku,)).fetchone()
+        conn.execute("BEGIN IMMEDIATE;")
+        item = conn.execute(
+            "SELECT * FROM v_inventory_status WHERE sku = ?;",
+            (sku,),
+        ).fetchone()
         if item is None:
-            conn.close()
-            return {"ok": False, "error": f"Unknown SKU {sku}. Check the SKU and try again."}
+            return {"ok": False, "status": "error", "error": f"Unknown SKU {sku}. Check the SKU and try again."}
 
         qty = quantity if quantity is not None else item["reorder_qty"]
         if qty < 1 or qty > MAX_ORDER_QTY:
-            conn.close()
-            return {"ok": False, "error": f"Quantity must be between 1 and {MAX_ORDER_QTY}."}
-
-        # Check existing pending PO
-        existing = cursor.execute(
-            """SELECT po_number, sku, quantity, CAST(total_cost AS REAL) AS total_cost, status,
-                      created_at FROM purchase_orders WHERE sku = ? AND status = ?""",
-            (sku, "pending_review"),
-        ).fetchone()
-
-        if existing:
-            conn.close()
             return {
-                "ok": True,
-                "duplicate": True,
-                "message": f"An order for {item['name']} is already waiting for approval.",
-                "manifest": dict(existing),
-                "log_summary": f"trigger_reorder: duplicate {sku}",
+                "ok": False,
+                "status": "error",
+                "error": f"Quantity must be between 1 and {MAX_ORDER_QTY}.",
             }
 
-        # Generate PO Number
-        cursor.execute("SELECT COUNT(*) + 1046 AS next_id FROM purchase_orders")
-        next_po_num = f"PO-{cursor.fetchone()['next_id']}"
+        existing = conn.execute(
+            """
+            SELECT po_number, sku, quantity, CAST(total_cost AS REAL) AS total_cost, status,
+                   created_at
+            FROM purchase_orders
+            WHERE sku = ? AND status = ?;
+            """,
+            (sku, "pending_review"),
+        ).fetchone()
+        if existing:
+            po = dict(existing)
+            po.update(product=item["name"], supplier=item["supplier"])
+            markdown_table = _reorder_markdown_table(po)
+            return {
+                "ok": True,
+                "status": "success",
+                "duplicate": True,
+                "message": f"An order for {item['name']} is already waiting for approval.",
+                "manifest": po,
+                "markdown_table": markdown_table,
+                "log_summary": f"trigger_reorder: duplicate {sku}",
+            }
 
         unit_cost = float(item["unit_cost"])
         total_cost = round(qty * unit_cost, 2)
         lead_time = int(item["lead_time_days"])
-        exp_del = (datetime.now() + timedelta(days=lead_time)).strftime("%Y-%m-%d")
+        expected_delivery = (datetime.now() + timedelta(days=lead_time)).strftime("%Y-%m-%d")
+        minute_second = datetime.now().strftime("%M%S")
+        po_number = None
+        for suffix in range(10_000):
+            candidate = f"PO-{minute_second}-{suffix:04d}"
+            exists = conn.execute(
+                "SELECT 1 FROM purchase_orders WHERE po_number = ?;",
+                (candidate,),
+            ).fetchone()
+            if exists is None:
+                po_number = candidate
+                break
+        if po_number is None:
+            raise sqlite3.IntegrityError("Could not allocate a unique PO number.")
 
-        cursor.execute(
-            """INSERT INTO purchase_orders 
-               (po_number, sku, supplier_id, quantity, unit_cost, total_cost, status, created_by, reason, expected_delivery)
-               VALUES (?, ?, ?, ?, ?, ?, 'pending_review', 'copilot', ?, ?)""",
-            (next_po_num, sku, item["supplier_id"], qty, unit_cost, total_cost, reason, exp_del),
+        conn.execute(
+            """
+            INSERT INTO purchase_orders
+                (po_number, sku, supplier_id, quantity, unit_cost, total_cost, status,
+                 created_by, reason, expected_delivery)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending_review', 'copilot', ?, ?);
+            """,
+            (po_number, sku, item["supplier_id"], qty, unit_cost, total_cost, reason, expected_delivery),
         )
         conn.commit()
-
-        # Fetch freshly inserted PO
-        po = dict(
-            cursor.execute(
-                """SELECT po_number, sku, quantity, status, unit_cost, total_cost, reason, created_at, expected_delivery 
-                   FROM purchase_orders WHERE po_number = ?""",
-                (next_po_num,),
-            ).fetchone()
-        )
-
+        po_row = conn.execute(
+            """
+            SELECT po_number, sku, quantity, status, unit_cost, total_cost,
+                   reason, created_at, expected_delivery
+            FROM purchase_orders WHERE po_number = ?;
+            """,
+            (po_number,),
+        ).fetchone()
+        po = dict(po_row)
+        po.update(product=item["name"], supplier=item["supplier"])
     except sqlite3.IntegrityError:
+        conn.rollback()
+        return {
+            "ok": False,
+            "status": "error",
+            "error": "An order could not be created because a matching pending order already exists.",
+        }
+    finally:
         conn.close()
-        return {"ok": True, "duplicate": True, "message": "An order for this SKU is already waiting for approval."}
-
-    conn.close()
 
     avg = float(item["avg_daily_usage"] or 0)
     cover = None
@@ -276,19 +303,79 @@ def trigger_reorder(sku: str, quantity: int | None = None, reason: str | None = 
         stock_at_arrival = max(item["on_hand"] - (avg * item["lead_time_days"]), 0)
         cover = round((stock_at_arrival + qty) / avg, 1)
 
-    po["product"] = item["name"]
-    po["supplier"] = item["supplier"]
+    markdown_table = _reorder_markdown_table(po)
 
     return {
         "ok": True,
+        "status": "success",
         "duplicate": False,
         "message": f"Created {po['po_number']} for {qty} x {item['name']}.",
         "days_of_cover_after_delivery": cover,
         "manifest": po,
+        "markdown_table": markdown_table,
         "log_summary": f"trigger_reorder: {po['po_number']} {sku}",
     }
 
-# Tool 4: list_purchase_orders
+
+def _reorder_markdown_table(order: dict) -> str:
+    def cell(value):
+        return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ")
+
+    return (
+        "| PO Number | SKU | Product | Supplier | Qty | Total Cost |\n"
+        "|---|---|---|---|---:|---:|\n"
+        f"| {cell(order.get('po_number'))} | {cell(order.get('sku'))} | "
+        f"{cell(order.get('product'))} | {cell(order.get('supplier'))} | "
+        f"{cell(order.get('quantity'))} | ${float(order.get('total_cost') or 0):,.2f} |"
+    )
+
+# Tool 4: get_supplier_info
+@mcp.tool()
+@logged("get_supplier_info")
+def get_supplier_info(
+    sku: str | None = None,
+    name: str | None = None,
+    limit: int = 10,
+) -> dict:
+    """Look up supplier contact details, lead times, reliability, and stocked products."""
+    limit = max(1, min(limit, 50))
+    conditions = []
+    params = []
+    if sku:
+        conditions.append("p.sku = ?")
+        params.append(sku.strip().upper())
+    if name:
+        conditions.append("s.name LIKE ?")
+        params.append(f"%{name.strip()}%")
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT s.supplier_id, s.name, s.contact_email, s.lead_time_days,
+                   s.reliability, COUNT(DISTINCT p.sku) AS product_count
+            FROM suppliers s
+            LEFT JOIN products p ON p.supplier_id = s.supplier_id AND p.active = 1
+            {where}
+            GROUP BY s.supplier_id, s.name, s.contact_email, s.lead_time_days, s.reliability
+            ORDER BY s.name
+            LIMIT ?;
+            """,
+            params + [limit],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    suppliers = [dict(row) for row in rows]
+    return {
+        "ok": True,
+        "suppliers": suppliers,
+        "log_summary": f"get_supplier_info: {len(suppliers)} suppliers",
+    }
+
+
+# Tool 5: list_purchase_orders
 @mcp.tool()
 @logged("list_purchase_orders")
 def list_purchase_orders(status: str | None = None, limit: int = 10) -> dict:
@@ -304,25 +391,29 @@ def list_purchase_orders(status: str | None = None, limit: int = 10) -> dict:
     params = [status] if status else []
 
     conn = get_db()
-    cursor = conn.cursor()
-
-    sql_orders = f"""
-        SELECT po.po_number, po.sku, p.name AS product, s.name AS supplier, po.quantity,
-               CAST(po.total_cost AS REAL) AS total_cost, po.status, po.reason, po.created_at
-        FROM purchase_orders po 
-        JOIN products p ON p.sku = po.sku
-        JOIN suppliers s ON s.supplier_id = po.supplier_id
-        {where}
-        ORDER BY po.created_at DESC LIMIT ?
-    """
-    rows = [dict(r) for r in cursor.execute(sql_orders, params + [limit]).fetchall()]
-
-    pending = cursor.execute(
-        "SELECT COUNT(*) AS n, COALESCE(SUM(total_cost), 0) AS value FROM purchase_orders WHERE status = ?",
-        ("pending_review",),
-    ).fetchone()
-
-    conn.close()
+    try:
+        sql_orders = f"""
+            SELECT po.po_number, po.sku, p.name AS product, s.name AS supplier, po.quantity,
+                   CAST(po.total_cost AS REAL) AS total_cost, po.status, po.reason, po.created_at
+            FROM purchase_orders po
+            JOIN products p ON p.sku = po.sku
+            JOIN suppliers s ON s.supplier_id = po.supplier_id
+            {where}
+            ORDER BY po.created_at DESC, po.po_number DESC LIMIT ?
+        """
+        rows = [
+            dict(row)
+            for row in conn.execute(sql_orders, params + [limit]).fetchall()
+        ]
+        pending = conn.execute(
+            """
+            SELECT COUNT(*) AS n, COALESCE(SUM(total_cost), 0) AS value
+            FROM purchase_orders WHERE status = ?;
+            """,
+            ("pending_review",),
+        ).fetchone()
+    finally:
+        conn.close()
 
     return {
         "ok": True,

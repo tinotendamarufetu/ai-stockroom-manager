@@ -75,5 +75,3 @@ Licensed under the MIT License.
    * Tool execution chips appearing (`predict_stockout`, `trigger_reorder`).
    * Inspecting PO details, downloading the PDF invoice, and clicking **Approve** in the Replenishment Manifest.
 4. Submit on Devpost under the **Alexa+ Track** and select **Open Source Challenge**.
-
-You built an end-to-end, production-grade AI agent system! Let me know if you need any a

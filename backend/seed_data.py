@@ -8,12 +8,28 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from backend.app.database import get_db_connection, init_db
 
 def seed_database():
+    rng = random.Random(42)
     init_db()
     conn = get_db_connection()
+    try:
+        _populate_database(conn, rng)
+    finally:
+        conn.close()
+
+
+def _populate_database(conn, rng):
     cursor = conn.cursor()
 
     # Clear tables
-    for table in ["activity_log", "purchase_orders", "sales_daily", "inventory", "products", "suppliers"]:
+    for table in [
+        "chat_sessions",
+        "activity_log",
+        "purchase_orders",
+        "sales_daily",
+        "inventory",
+        "products",
+        "suppliers",
+    ]:
         cursor.execute(f"DELETE FROM {table};")
 
     # 1. Suppliers
@@ -57,37 +73,37 @@ def seed_database():
     # Generate remaining ~496 products to hit total ~500 items and ~$642K total value
     counter = 1000
     for i in range(496):
-        cat_name, zone, supp_name = random.choice(categories)
+        cat_name, zone, supp_name = rng.choice(categories)
         sku = f"SKU-{counter}"
         counter += 1
         p_name = f"{cat_name} Grade Item {counter}"
-        unit_cost = round(random.uniform(5.0, 150.0), 2)
-        reorder_qty = random.choice([12, 24, 48, 96, 100])
+        unit_cost = round(rng.uniform(5.0, 150.0), 2)
+        reorder_qty = rng.choice([12, 24, 48, 96, 100])
         
         # Balance distributions: ~8% critical (41 total), ~12% warning (63), ~62% healthy (312), ~18% overstocked (84)
-        r = random.random()
+        r = rng.random()
         if len([p for p in all_products if len(p) == 9 and p[8] == 'critical']) < 37 and r < 0.08:
             # Force critical
-            daily_avg = random.uniform(2.0, 5.0)
+            daily_avg = rng.uniform(2.0, 5.0)
             lead_time = suppliers_data[[s[0] for s in suppliers_data].index(supp_name)][1]
             on_hand = int(daily_avg * (lead_time - 0.5))
             all_products.append((sku, p_name, cat_name, zone, supp_name, unit_cost, reorder_qty, on_hand, daily_avg))
         elif r < 0.20:
             # Force warning
-            daily_avg = random.uniform(1.0, 4.0)
+            daily_avg = rng.uniform(1.0, 4.0)
             lead_time = suppliers_data[[s[0] for s in suppliers_data].index(supp_name)][1]
-            on_hand = int(daily_avg * (lead_time + random.uniform(1, 5)))
+            on_hand = int(daily_avg * (lead_time + rng.uniform(1, 5)))
             all_products.append((sku, p_name, cat_name, zone, supp_name, unit_cost, reorder_qty, on_hand, daily_avg))
         elif r < 0.38:
             # Force overstocked
-            daily_avg = random.uniform(0.1, 0.5)
-            on_hand = int(daily_avg * random.randint(95, 150))
+            daily_avg = rng.uniform(0.1, 0.5)
+            on_hand = int(daily_avg * rng.randint(95, 150))
             all_products.append((sku, p_name, cat_name, zone, supp_name, unit_cost, reorder_qty, on_hand, daily_avg))
         else:
             # Healthy
-            daily_avg = random.uniform(1.0, 3.0)
+            daily_avg = rng.uniform(1.0, 3.0)
             lead_time = suppliers_data[[s[0] for s in suppliers_data].index(supp_name)][1]
-            on_hand = int(daily_avg * (lead_time + random.uniform(10, 30)))
+            on_hand = int(daily_avg * (lead_time + rng.uniform(10, 30)))
             all_products.append((sku, p_name, cat_name, zone, supp_name, unit_cost, reorder_qty, on_hand, daily_avg))
 
     # Insert Products, Inventory & Sales History
@@ -115,7 +131,7 @@ def seed_database():
         for day_offset in range(180, 0, -1):
             sale_date = today - timedelta(days=day_offset)
             # Add small random variation around avg_daily_usage
-            qty = max(0, int(random.gauss(daily_avg, daily_avg * 0.2)))
+            qty = max(0, int(rng.gauss(daily_avg, daily_avg * 0.2)))
             cursor.execute("""
             INSERT INTO sales_daily (sku, sale_date, units_sold)
             VALUES (?, ?, ?);
@@ -144,7 +160,6 @@ def seed_database():
     """, (json.dumps({"skus_seeded": len(all_products)}),))
 
     conn.commit()
-    conn.close()
     print("Database seeded with ~500 items and mockup matching numbers!")
 
 if __name__ == "__main__":

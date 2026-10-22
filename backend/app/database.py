@@ -1,25 +1,42 @@
 import sqlite3
 import os
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Generator
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "data" / "stockroom.db"
 
+
 def get_db_connection():
     os.makedirs(DB_PATH.parent, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    # Enable Foreign Keys & Write-Ahead Logging (WAL) for high-concurrency shared state
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
+    except Exception:
+        conn.close()
+        raise
     return conn
 
-def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
 
-    # 1. Suppliers
-    cursor.execute("""
+@contextmanager
+def db_connection() -> Generator[sqlite3.Connection, None, None]:
+    conn = get_db_connection()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def init_db():
+    with db_connection() as conn:
+        cursor = conn.cursor()
+
+        # 1. Suppliers
+        cursor.execute("""
     CREATE TABLE IF NOT EXISTS suppliers (
         supplier_id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE NOT NULL,
@@ -29,8 +46,8 @@ def init_db():
     );
     """)
 
-    # 2. Products
-    cursor.execute("""
+        # 2. Products
+        cursor.execute("""
     CREATE TABLE IF NOT EXISTS products (
         sku TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -45,8 +62,8 @@ def init_db():
     );
     """)
 
-    # 3. Inventory
-    cursor.execute("""
+        # 3. Inventory
+        cursor.execute("""
     CREATE TABLE IF NOT EXISTS inventory (
         sku TEXT PRIMARY KEY,
         on_hand INTEGER NOT NULL,
@@ -57,8 +74,8 @@ def init_db():
     );
     """)
 
-    # 4. Sales Daily
-    cursor.execute("""
+        # 4. Sales Daily
+        cursor.execute("""
     CREATE TABLE IF NOT EXISTS sales_daily (
         sku TEXT NOT NULL,
         sale_date DATE NOT NULL,
@@ -68,8 +85,8 @@ def init_db():
     );
     """)
 
-    # 5. Purchase Orders
-    cursor.execute("""
+        # 5. Purchase Orders
+        cursor.execute("""
     CREATE TABLE IF NOT EXISTS purchase_orders (
         po_number TEXT PRIMARY KEY,
         sku TEXT NOT NULL,
@@ -88,14 +105,14 @@ def init_db():
     );
     """)
 
-    cursor.execute("""
+        cursor.execute("""
     CREATE UNIQUE INDEX IF NOT EXISTS uq_one_open_po_per_sku 
     ON purchase_orders(sku) 
     WHERE status = 'pending_review';
     """)
 
-    # 6. Activity Log
-    cursor.execute("""
+        # 6. Activity Log
+        cursor.execute("""
     CREATE TABLE IF NOT EXISTS activity_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         source TEXT NOT NULL,
@@ -109,8 +126,8 @@ def init_db():
     );
     """)
 
-    # 7. Persistent Session Memory Table
-    cursor.execute("""
+        # 7. Persistent Session Memory Table
+        cursor.execute("""
     CREATE TABLE IF NOT EXISTS chat_sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT NOT NULL,
@@ -121,9 +138,9 @@ def init_db():
     );
     """)
 
-    # 8. Inventory Status View
-    cursor.execute("DROP VIEW IF EXISTS v_inventory_status;")
-    cursor.execute("""
+        # 8. Inventory Status View
+        cursor.execute("DROP VIEW IF EXISTS v_inventory_status;")
+        cursor.execute("""
     CREATE VIEW v_inventory_status AS
     WITH usage AS (
         SELECT 
@@ -164,8 +181,7 @@ def init_db():
     WHERE p.active = 1;
     """)
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 if __name__ == "__main__":
     init_db()
