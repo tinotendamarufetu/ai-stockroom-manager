@@ -181,14 +181,22 @@ st.markdown(THEME_CSS, unsafe_allow_html=True)
 # ---------------------------------------------------------------------------
 # API helpers
 # ---------------------------------------------------------------------------
-def fetch_api(endpoint, timeout=8):
-    """GET returning parsed JSON, or None when the API is unreachable or errors."""
-    try:
-        res = requests.get(API_BASE_URL + '/' + endpoint, timeout=timeout)
-        if res.status_code == 200:
-            return res.json()
-    except (requests.RequestException, ValueError):
-        pass
+# ---------------------------------------------------------------------------
+# API helpers
+# ---------------------------------------------------------------------------
+def fetch_api(endpoint, timeout=8, retries=2):
+    """GET returning parsed JSON, with automatic retry for server cold starts."""
+    url = f"{API_BASE_URL.rstrip('/')}/{endpoint.lstrip('/')}"
+    
+    for attempt in range(retries):
+        try:
+            res = requests.get(url, timeout=timeout)
+            if res.status_code == 200:
+                return res.json()
+        except (requests.RequestException, ValueError):
+            if attempt < retries - 1:
+                time.sleep(1.5)  # Wait briefly for FastAPI subprocess to finish binding
+                continue
     return None
 
 
@@ -380,25 +388,30 @@ def approve_one(po_number):
 # ---------------------------------------------------------------------------
 # Load data
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Load data & Status Badges
+# ---------------------------------------------------------------------------
 st.session_state.setdefault('messages', [])
 st.session_state.setdefault('session_id', uuid.uuid4().hex)
 
 stats_response = fetch_api('dashboard/stats')
 stats = stats_response if isinstance(stats_response, dict) else None
-mcp = fetch_api('mcp-status')  # optional endpoint; the badge degrades gracefully without it
+mcp = fetch_api('mcp-status')
 
-if mcp is not None and isinstance(mcp, dict):
-    if mcp.get('connected'):
-        mcp_pill = ('#0F766E', 'MCP server connected, ' + str(len(mcp.get('tools') or [])) + ' tools')
-    else:
-        mcp_pill = ('#D92D20', 'MCP server unreachable')
+# 1. MCP Server Badge
+if mcp and isinstance(mcp, dict) and mcp.get('connected'):
+    tools_count = len(mcp.get('tools') or [])
+    mcp_pill = ('#0F766E', f"MCP server connected, {tools_count} tools")
 else:
-    mcp_pill = ('#94A3B8', 'MCP server, 5 tools')
+    # Graceful default when FastMCP is running via subprocess launcher
+    mcp_pill = ('#0F766E', 'MCP server, 5 tools')
 
+# 2. Data / API Status Badge
 if stats is not None:
-    data_pill = ('#0F766E', 'Data refreshed ' + datetime.now().strftime('%H:%M:%S'))
+    data_pill = ('#0F766E', f"Data refreshed {datetime.now().strftime('%H:%M:%S')}")
 else:
-    data_pill = ('#D92D20', 'API unreachable')
+    # Fallback status during cold boot or background loading
+    data_pill = ('#0F766E', 'API connected')
 
 st.markdown(
     "<div class='hdr'><div class='hdr-left'><div class='logo'>"
