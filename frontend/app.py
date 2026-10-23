@@ -395,7 +395,7 @@ st.session_state.setdefault('messages', [])
 st.session_state.setdefault('session_id', uuid.uuid4().hex)
 
 stats_response = fetch_api('dashboard/stats')
-stats = stats_response if isinstance(stats_response, dict) else None
+stats = stats_response if isinstance(stats_response, dict) else {}
 mcp = fetch_api('mcp-status')
 
 # 1. MCP Server Badge
@@ -426,7 +426,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if stats is None:
+if not stats:
     st.info(
         "⚡ Connecting to Stockroom Copilot backend services... "
         "If data doesn't render immediately, give it a few seconds and refresh."
