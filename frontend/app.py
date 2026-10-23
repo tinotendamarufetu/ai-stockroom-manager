@@ -22,30 +22,40 @@ import streamlit as st
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def ensure_backend_running():
-    """Start the FastAPI/FastMCP backend in the background if it's not already running."""
+    """Start the FastAPI backend and automatically seed the SQLite database if empty."""
     try:
-        # Check if backend is alive
         res = requests.get("http://127.0.0.1:8000/api/mcp-status", timeout=1.5)
         if res.status_code == 200:
             return
     except Exception:
-        pass  # Server is not running yet
+        pass
 
-    # Ensure PYTHONPATH includes project root so 'backend' imports resolve
     backend_env = os.environ.copy()
     backend_env["PYTHONPATH"] = BASE_DIR
 
-    # Launch backend as a subprocess with execution root set to BASE_DIR
+    # 1. Launch FastAPI backend
     subprocess.Popen(
         [sys.executable, "-m", "backend.app.api"],
-        cwd=BASE_DIR,  # <--- CRITICAL FIX FOR STREAMLIT CLOUD
+        cwd=BASE_DIR,
         env=backend_env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
-    # Allow server and DB startup time
-    time.sleep(4)
+    time.sleep(3)  # Wait for tables to be created
+
+    # 2. Run seed_data.py to populate catalog, inventory, and suppliers
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "backend.seed_data"],
+            cwd=BASE_DIR,
+            env=backend_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5
+        )
+    except Exception:
+        pass
 
 # Trigger launcher before Streamlit UI elements render
 ensure_backend_running()
