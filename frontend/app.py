@@ -427,11 +427,11 @@ st.markdown(
 )
 
 if stats is None:
-    st.error(
-        'Cannot reach the API at ' + API_BASE_URL + '. If the server is on a free plan it may be waking up, '
-        'which can take about a minute. Reload this page to try again.'
+    st.info(
+        "⚡ Connecting to Stockroom Copilot backend services... "
+        "If data doesn't render immediately, give it a few seconds and refresh."
     )
-    st.stop()
+    # Notice: st.stop() is removed so the rest of the app continues rendering!
 
 runway_response = fetch_api('dashboard/runway')
 runway = [row for row in runway_response if isinstance(row, dict)] if isinstance(runway_response, list) else []
