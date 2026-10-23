@@ -12,7 +12,9 @@ import math
 import os
 import uuid
 from datetime import datetime
-
+import subprocess
+import sys
+import time
 import requests
 import streamlit as st
 
@@ -37,6 +39,9 @@ def ensure_backend_running():
 
     # Give backend 3 seconds to boot up and initialize SQLite DB
     time.sleep(3)
+
+# Trigger launcher before Streamlit UI elements render
+ensure_backend_running()
 
 st.set_page_config(
     page_title='Stockroom Copilot | Carltren Supply',
