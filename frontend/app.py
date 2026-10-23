@@ -18,27 +18,34 @@ import time
 import requests
 import streamlit as st
 
+# Dynamically find project root (1 level up from frontend/)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 def ensure_backend_running():
     """Start the FastAPI/FastMCP backend in the background if it's not already running."""
     try:
-        # Quick health check on local port 8000
-        res = requests.get("http://127.0.0.1:8000/api/mcp-status", timeout=1)
+        # Check if backend is alive
+        res = requests.get("http://127.0.0.1:8000/api/mcp-status", timeout=1.5)
         if res.status_code == 200:
             return
     except Exception:
         pass  # Server is not running yet
 
-    # Launch backend as a subprocess
+    # Ensure PYTHONPATH includes project root so 'backend' imports resolve
     backend_env = os.environ.copy()
+    backend_env["PYTHONPATH"] = BASE_DIR
+
+    # Launch backend as a subprocess with execution root set to BASE_DIR
     subprocess.Popen(
         [sys.executable, "-m", "backend.app.api"],
+        cwd=BASE_DIR,  # <--- CRITICAL FIX FOR STREAMLIT CLOUD
         env=backend_env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
-    # Give backend 3 seconds to boot up and initialize SQLite DB
-    time.sleep(3)
+    # Allow server and DB startup time
+    time.sleep(4)
 
 # Trigger launcher before Streamlit UI elements render
 ensure_backend_running()
