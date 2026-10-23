@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from backend.app.database import db_connection
-from backend.app.agent import run_agent_loop, run_agent_workflow
+from backend.app.agent import run_agent_loop
 from backend.app.pdf_generator import generate_po_pdf
 from backend.seed_data import seed_database
 
@@ -299,19 +299,17 @@ def chat_endpoint(payload: ChatRequest):
         if not isinstance(result, dict) or not isinstance(result.get("reply"), str):
             raise ValueError("Agent returned an invalid response.")
     except Exception:
-        logger.exception("Agent failed; trying the local workflow fallback.")
-        try:
-            result = run_agent_workflow(payload.message)
-        except Exception:
-            logger.exception("Local workflow fallback failed.")
-            result = {
-                "reply": (
-                    "### Copilot is temporarily unavailable\n\n"
-                    "| Status | Details |\n|---|---|\n"
-                    "| Not completed | The request could not be processed. Please try again. |"
-                ),
-                "tool_calls": [],
-            }
+        logger.exception("Agent failed; returning a structured chat error.")
+        result = {
+            "reply": (
+                "### Copilot is temporarily unavailable\n\n"
+                "| Status | Details |\n|---|---|\n"
+                "| Not completed | The request could not be processed. Please try again. |"
+            ),
+            "tool_calls": [],
+            "mode": "error",
+            "fallback_reason": "agent_error",
+        }
 
     reply = result.get("reply")
     if not isinstance(reply, str) or not reply.strip():
@@ -321,10 +319,14 @@ def chat_endpoint(payload: ChatRequest):
             "| No response | No analysis was returned. Please try again. |"
         )
     tool_calls = result.get("tool_calls")
-    if not isinstance(tool_calls, list):
+    if not isinstance(tool_calls, list) or any(not isinstance(call, dict) for call in tool_calls):
         tool_calls = []
     response_payload = {"reply": reply, "tool_calls": tool_calls}
-    if result.get("status") == "error":
+    for key in ("mode", "model", "fallback_reason", "intent"):
+        value = result.get(key)
+        if isinstance(value, str):
+            response_payload[key] = value
+    if result.get("status") == "error" or result.get("mode") == "error":
         response_payload["status"] = "error"
 
     try:
@@ -334,7 +336,7 @@ def chat_endpoint(payload: ChatRequest):
                 INSERT INTO chat_sessions (session_id, role, content, tools_json)
                 VALUES (?, 'model', ?, ?);
                 """,
-                (payload.session_id, reply, json.dumps(tool_calls)),
+                (payload.session_id, reply, json.dumps(tool_calls, default=str)),
             )
             conn.commit()
     except Exception:

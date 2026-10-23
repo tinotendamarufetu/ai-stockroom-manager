@@ -1,31 +1,28 @@
 # Virtual Environment
-venv/
-env/
-ENV/
 .venv/
+venv/
+ENV/
 
-# Environment Variables & Secrets
-.env
-*.env
-!.env.example
-
-# Python Bytecode & Cache
+# Python Cache & Bytecode
 __pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
 
-# SQLite Database Files
+# Environment & Secrets
+.env
+.env.*
+
+# Local Database Files
 *.db
-*.sqlite
 *.sqlite3
 backend/data/*.db
 
-# IDE & OS Files
+# IDE & Editor Settings
 .vscode/
 .idea/
+*.swp
+
+# OS Generated Files
 .DS_Store
 Thumbs.db
-
-# Streamlit Cache & Settings
-.streamlit/secrets.toml

@@ -16,6 +16,28 @@ from datetime import datetime
 import requests
 import streamlit as st
 
+def ensure_backend_running():
+    """Start the FastAPI/FastMCP backend in the background if it's not already running."""
+    try:
+        # Quick health check on local port 8000
+        res = requests.get("http://127.0.0.1:8000/api/mcp-status", timeout=1)
+        if res.status_code == 200:
+            return
+    except Exception:
+        pass  # Server is not running yet
+
+    # Launch backend as a subprocess
+    backend_env = os.environ.copy()
+    subprocess.Popen(
+        [sys.executable, "-m", "backend.app.api"],
+        env=backend_env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Give backend 3 seconds to boot up and initialize SQLite DB
+    time.sleep(3)
+
 st.set_page_config(
     page_title='Stockroom Copilot | Carltren Supply',
     page_icon='\U0001F4E6',
@@ -310,7 +332,23 @@ def bubble_html(msg: dict) -> str:
     tools_html = chips_html(msg.get("tools") or [])
     if role == "user":
         return f"<div class='b-user'><b>You:</b> {html_content}</div>"
-    return f"<div class='b-bot'>{tools_html}<b>Copilot:</b><br/>{html_content}</div>"
+    mode_labels = {
+        'fallback': 'Local fallback',
+        'gemini': 'Gemini',
+        'gemini+template': 'Gemini + verified template',
+        'router': 'Quick reply',
+        'guardrail': 'Guardrail',
+        'error': 'Error',
+    }
+    mode = msg.get('mode')
+    mode_label = mode_labels.get(mode, mode)
+    if mode_label and msg.get('model'):
+        mode_label += ' (' + str(msg['model']) + ')'
+    mode_html = (
+        "<div class='chips'><span class='chip'>" + esc(mode_label) + '</span></div>'
+        if mode_label else ''
+    )
+    return f"<div class='b-bot'>{mode_html}{tools_html}<b>Copilot:</b><br/>{html_content}</div>"
 
 
 def queue_prompt(text):
@@ -550,7 +588,9 @@ with col_right:
                                          'session_id': st.session_state['session_id']}, timeout=90)
             if 'reply' in resp:
                 messages.append({'role': 'assistant', 'content': resp.get('reply') or 'Done.',
-                                 'tools': resp.get('tool_calls') or []})
+                                 'tools': resp.get('tool_calls') or [], 'mode': resp.get('mode'),
+                                 'model': resp.get('model'),
+                                 'fallback_reason': resp.get('fallback_reason')})
             else:
                 messages.append({'role': 'assistant', 'tools': [],
                                  'content': str(resp.get('error') or 'The copilot could not answer. Try again.')})
